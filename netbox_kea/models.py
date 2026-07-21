@@ -133,10 +133,34 @@ class Server(NetBoxModel):
             raise ValidationError(
                 {"cb_dsn": "cb mode requires the config backend DSN."}
             )
-        if self.mode in (
-            ServerModeChoices.MODE_CB,
-            ServerModeChoices.MODE_AGENT,
-        ) and not self.dhcp4_url:
+        if self.cb_dsn:
+            # enforce the documented password-free invariant: cb_dsn is
+            # API-readable and changelog-visible, unlike the password field
+            from psycopg import conninfo
+
+            try:
+                parsed = conninfo.conninfo_to_dict(self.cb_dsn)
+            except Exception as e:
+                raise ValidationError({"cb_dsn": f"Invalid libpq DSN: {e}"}) from e
+            if "password" in parsed:
+                raise ValidationError(
+                    {
+                        "cb_dsn": (
+                            "cb_dsn must not contain a password (it is "
+                            "stored and exposed in cleartext) — the "
+                            "daemon supplies credentials via PG* "
+                            "environment variables."
+                        )
+                    }
+                )
+        if (
+            self.mode
+            in (
+                ServerModeChoices.MODE_CB,
+                ServerModeChoices.MODE_AGENT,
+            )
+            and not self.dhcp4_url
+        ):
             raise ValidationError(
                 {
                     "dhcp4_url": (

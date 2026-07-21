@@ -1,5 +1,6 @@
 import logging
 
+from netbox.api.authentication import TokenWritePermission
 from netbox.api.viewsets import NetBoxModelViewSet
 from rest_framework import status
 from rest_framework.response import Response
@@ -24,14 +25,22 @@ class LeaseEventView(APIView):
     Replaces the standalone syncer's bottle /lease/ endpoint; NetBox
     token auth replaces the homemade shared-secret header. Body:
     {"action": "add"|"del", "address", "hostname", "hwaddr"}.
-    Touches only status=dhcp IPs (reflection population)."""
+    Touches only status=dhcp IPs (reflection population).
+
+    TokenWritePermission: NetBox's default TokenPermissions is model-
+    bound (asserts on a missing queryset — every request would 500);
+    this is NetBox's own class for custom non-CRUD actions, and it
+    still enforces the token's write_enabled flag."""
+
+    permission_classes = [TokenWritePermission]
 
     def post(self, request):
         lease = request.data if isinstance(request.data, dict) else None
         if not lease or "address" not in lease:
             return Response(
                 {"detail": 'lease body missing "address"'},
-                status=status.HTTP_400_BAD_REQUEST)
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         address = lease["address"]
         addr = address if "/" in address else f"{address}/32"
         action = lease.get("action")
@@ -46,5 +55,6 @@ class LeaseEventView(APIView):
         else:
             return Response(
                 {"detail": f"unknown lease action: {action}"},
-                status=status.HTTP_400_BAD_REQUEST)
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         return Response({"detail": "ok"}, status=status.HTTP_201_CREATED)

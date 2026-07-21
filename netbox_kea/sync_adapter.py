@@ -12,6 +12,7 @@ custom_fields as a dict, assigned_object with a string mac_address.
 
 import logging
 
+from django.utils.datastructures import MultiValueDict
 from ipam.filtersets import (
     IPAddressFilterSet,
     IPRangeFilterSet,
@@ -75,15 +76,35 @@ class _IPAddressView:
 class OrmAdapter:
     """Drop-in for keasync's `nb` dependency, backed by the local ORM."""
 
-    def __init__(self, prefix_filter=None, iprange_filter=None,
-                 ipaddress_filter=None):
+    def __init__(self, prefix_filter=None, iprange_filter=None, ipaddress_filter=None):
         self.prefix_filter = prefix_filter or {}
         self.iprange_filter = iprange_filter or {}
         self.ipaddress_filter = ipaddress_filter or {"status": "dhcp"}
 
     @staticmethod
     def _filtered(filterset_cls, model, data):
-        fs = filterset_cls(data=data, queryset=model.objects.all())
+        """Bind a plain filter dict with REST-querystring semantics.
+
+        FilterSet forms read multi-value fields via getlist() and scalar
+        fields via get() — a MultiValueDict with every value as a list
+        serves both, exactly like a real querystring. A plain dict with
+        scalar values makes MultipleChoiceFilter fields (status,
+        *_id, parent) fail validation, and django-filter then SILENTLY
+        drops the constraint — so invalid filter data is a hard error
+        here, never a wider-than-intended queryset."""
+
+        mvd = MultiValueDict(
+            {
+                k: list(v) if isinstance(v, (list, tuple)) else [v]
+                for k, v in data.items()
+            }
+        )
+        fs = filterset_cls(data=mvd, queryset=model.objects.all())
+        if fs.form.errors:
+            raise ValueError(
+                f"invalid filter data for {filterset_cls.__name__}: "
+                f"{dict(fs.form.errors)}"
+            )
         return fs.qs
 
     # --- prefixes ---
@@ -95,8 +116,8 @@ class OrmAdapter:
 
     def prefixes(self, contains):
         qs = self._filtered(
-            PrefixFilterSet, Prefix,
-            {**self.prefix_filter, "contains": contains})
+            PrefixFilterSet, Prefix, {**self.prefix_filter, "contains": contains}
+        )
         return (_PrefixView(o) for o in qs)
 
     def all_prefixes(self):
@@ -112,27 +133,25 @@ class OrmAdapter:
 
     def ip_ranges(self, parent):
         qs = self._filtered(
-            IPRangeFilterSet, IPRange,
-            {**self.iprange_filter, "parent": [parent]})
+            IPRangeFilterSet, IPRange, {**self.iprange_filter, "parent": parent}
+        )
         return (_IPRangeView(o) for o in qs)
 
     # --- ip addresses ---
 
     def ip_address(self, id_):
-        qs = self._filtered(
-            IPAddressFilterSet, IPAddress, self.ipaddress_filter)
+        qs = self._filtered(IPAddressFilterSet, IPAddress, self.ipaddress_filter)
         obj = qs.filter(pk=id_).first()
         return _IPAddressView(obj) if obj else None
 
     def ip_addresses(self, **filters):
         if not filters:
             raise ValueError(
-                "OrmAdapter.ip_addresses() requires at least one keyword arg")
-        if "parent" in filters:
-            filters["parent"] = [filters["parent"]]
+                "OrmAdapter.ip_addresses() requires at least one keyword arg"
+            )
         qs = self._filtered(
-            IPAddressFilterSet, IPAddress,
-            {**self.ipaddress_filter, **filters})
+            IPAddressFilterSet, IPAddress, {**self.ipaddress_filter, **filters}
+        )
         return (_IPAddressView(o) for o in qs)
 
     # --- lease reflection (status=dhcp population only) ---
@@ -140,16 +159,21 @@ class OrmAdapter:
     def upsert_dhcp_ip(self, address, dns_name=None, description=None):
         """Reflection semantics (see keasync): dns_name/description mirror
         the CURRENT lease state — None clears."""
-        existing = IPAddress.objects.filter(
-            address=address, status="dhcp").first()
+        existing = IPAddress.objects.filter(address=address, status="dhcp").first()
         if existing:
             existing.dns_name = dns_name or ""
             existing.description = description or ""
-            existing.save()
+            # scoped save: a full-row save() would lose concurrent edits
+            # to other fields; last_updated is auto_now and Django skips
+            # auto_now fields omitted from update_fields
+            existing.save(update_fields=["dns_name", "description", "last_updated"])
             return _IPAddressView(existing)
-        obj = IPAddress(address=address, status="dhcp",
-                        dns_name=dns_name or "",
-                        description=description or "")
+        obj = IPAddress(
+            address=address,
+            status="dhcp",
+            dns_name=dns_name or "",
+            description=description or "",
+        )
         obj.save()
         return _IPAddressView(obj)
 
@@ -158,5 +182,4 @@ class OrmAdapter:
             ip.delete()
 
     def dhcp_ips(self):
-        return (_IPAddressView(o)
-                for o in IPAddress.objects.filter(status="dhcp"))
+        return (_IPAddressView(o) for o in IPAddress.objects.filter(status="dhcp"))

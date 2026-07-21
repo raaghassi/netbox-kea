@@ -47,6 +47,10 @@ packages = [
 [tool.ruff]
 exclude = [
   "netbox_kea/migrations",
+  # verbatim port of the netbox-kea-dhcp engine + its tests: kept
+  # byte-identical to the reviewed upstream-fork code, not reformatted
+  "keasync",
+  "tests_engine",
 ]
 
 [tool.ruff.lint]

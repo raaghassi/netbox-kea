@@ -58,10 +58,18 @@ def register():
     from ipam.models import IPAddress, IPRange, Prefix
     from virtualization.models import VirtualMachine, VMInterface
 
-    senders = [Prefix, IPRange, IPAddress, Interface, Device,
-               VMInterface, VirtualMachine]
+    senders = [
+        Prefix,
+        IPRange,
+        IPAddress,
+        Interface,
+        Device,
+        VMInterface,
+        VirtualMachine,
+    ]
     try:
         from netbox_dns.models import Zone
+
         senders.append(Zone)
     except ImportError:
         logger.debug("netbox_dns not installed; zone events disabled")

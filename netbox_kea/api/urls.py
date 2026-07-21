@@ -9,7 +9,6 @@ router = NetBoxRouter()
 router.register("servers", views.ServerViewSet)
 
 urlpatterns = [
-    path("lease-events/", views.LeaseEventView.as_view(),
-         name="lease_events"),
+    path("lease-events/", views.LeaseEventView.as_view(), name="lease_events"),
     *router.urls,
 ]

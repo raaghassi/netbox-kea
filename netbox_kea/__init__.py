@@ -24,26 +24,26 @@ class NetBoxKeaConfig(PluginConfig):
         # NetBox-attribute -> Kea-setting maps (engine defaults; the
         # custom_fields.* paths resolve against custom_field_data).
         "sync_subnet_prefix_map": {
-            "option-data.routers":
-                "custom_fields.dhcp_option_data_routers",
-            "option-data.domain-search":
-                "custom_fields.dhcp_option_data_domain_search",
-            "option-data.domain-name-servers":
-                "custom_fields.dhcp_option_data_domain_name_servers",
+            "option-data.routers": "custom_fields.dhcp_option_data_routers",
+            "option-data.domain-search": "custom_fields.dhcp_option_data_domain_search",
+            "option-data.domain-name-servers": "custom_fields.dhcp_option_data_domain_name_servers",
             "next-server": "custom_fields.dhcp_next_server",
             "boot-file-name": "custom_fields.dhcp_boot_file_name",
             "valid-lifetime": "custom_fields.dhcp_valid_lifetime",
-            "ddns-qualifying-suffix":
-                "custom_fields.dhcp_ddns_qualifying_suffix",
-            "ddns-send-updates":
-                "custom_fields.dhcp_ddns_send_updates",
+            "ddns-qualifying-suffix": "custom_fields.dhcp_ddns_qualifying_suffix",
+            "ddns-send-updates": "custom_fields.dhcp_ddns_send_updates",
         },
         "sync_pool_iprange_map": {},
         "sync_reservation_ipaddr_map": {
-            "hw-address": ["custom_fields.dhcp_reservation_hw_address",
-                           "assigned_object.mac_address"],
-            "hostname": ["dns_name", "assigned_object.device.name",
-                         "assigned_object.virtual_machine.name"],
+            "hw-address": [
+                "custom_fields.dhcp_reservation_hw_address",
+                "assigned_object.mac_address",
+            ],
+            "hostname": [
+                "dns_name",
+                "assigned_object.device.name",
+                "assigned_object.virtual_machine.name",
+            ],
         },
         # kea-dhcp-ddns (D2) zone management; credentials optional.
         "ddns_d2_url": None,
@@ -54,6 +54,7 @@ class NetBoxKeaConfig(PluginConfig):
     def ready(self):
         super().ready()
         from . import sync_signals
+
         sync_signals.register()
 
 

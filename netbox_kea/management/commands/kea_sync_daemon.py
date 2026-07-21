@@ -57,31 +57,39 @@ def build_registry():
         name = srv.name.strip().lower()
         if srv.mode == ServerModeChoices.MODE_CB:
             backends[name] = DHCP4CB(
-                srv.cb_dsn, api_url=srv.dhcp4_url,
-                api_username=srv.username, api_password=srv.password)
+                srv.cb_dsn,
+                api_url=srv.dhcp4_url,
+                api_username=srv.username,
+                api_password=srv.password,
+            )
         elif srv.mode == ServerModeChoices.MODE_AGENT:
             backends[name] = DHCP4App(
-                srv.dhcp4_url, username=srv.username,
-                password=srv.password)
+                srv.dhcp4_url, username=srv.username, password=srv.password
+            )
         elif srv.mode == ServerModeChoices.MODE_OBSERVE:
-            pollers.append(LeasePoller(
-                name, srv.dhcp4_url, OrmAdapter(),
-                username=srv.username, password=srv.password,
-                interval=srv.poll_interval))
+            pollers.append(
+                LeasePoller(
+                    name,
+                    srv.dhcp4_url,
+                    OrmAdapter(),
+                    username=srv.username,
+                    password=srv.password,
+                    interval=srv.poll_interval,
+                )
+            )
 
     default_tag = cfg.get("sync_default_server")
     if default_tag:
         default_tag = str(default_tag).strip().lower()
         if default_tag not in backends:
             logger.critical(
-                "sync_default_server %r is not a cb/agent-mode Server",
-                default_tag)
+                "sync_default_server %r is not a cb/agent-mode Server", default_tag
+            )
             sys.exit(1)
     elif len(backends) == 1:
         default_tag = next(iter(backends))
     elif len(backends) > 1:
-        logger.critical(
-            "multiple sync-mode Servers but no sync_default_server set")
+        logger.critical("multiple sync-mode Servers but no sync_default_server set")
         sys.exit(1)
     return backends, default_tag, pollers
 
@@ -91,11 +99,15 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument(
-            "--no-initial-sync", action="store_true",
-            help="Skip the full sync at startup.")
+            "--no-initial-sync",
+            action="store_true",
+            help="Skip the full sync at startup.",
+        )
         parser.add_argument(
-            "--once", action="store_true",
-            help="Full sync + one poll pass, then exit (no event loop).")
+            "--once",
+            action="store_true",
+            help="Full sync + one poll pass, then exit (no event loop).",
+        )
 
     def handle(self, *args, **options):
         cfg = _cfg()
@@ -106,27 +118,38 @@ class Command(BaseCommand):
             adapter = OrmAdapter(
                 prefix_filter=cfg.get("sync_prefix_filter"),
                 iprange_filter=cfg.get("sync_iprange_filter"),
-                ipaddress_filter=cfg.get("sync_ipaddress_filter"))
+                ipaddress_filter=cfg.get("sync_ipaddress_filter"),
+            )
             conn = Connector(
-                adapter, backends,
+                adapter,
+                backends,
                 cfg.get("sync_subnet_prefix_map"),
                 cfg.get("sync_pool_iprange_map"),
                 cfg.get("sync_reservation_ipaddr_map"),
                 check=cfg.get("sync_check_only", False),
-                default_tag=default_tag if len(backends) > 1 else None,
-                tag_field=cfg.get("sync_tag_field", "kea_server"))
-            logger.info("sync targets: %s (default %s)",
-                        ", ".join(backends), default_tag)
+                # unconditional: default_tag=None would disable cf tag
+                # routing AND its unknown-tag wipe-guard — with a single
+                # sync target, a prefix tagged for an observe-mode Server
+                # must be skipped, not silently synced to the sole backend
+                default_tag=default_tag,
+                tag_field=cfg.get("sync_tag_field", "kea_server"),
+            )
+            logger.info(
+                "sync targets: %s (default %s)", ", ".join(backends), default_tag
+            )
         else:
             logger.info("no cb/agent-mode Servers; sync disabled")
 
         ddns = None
         if cfg.get("ddns_d2_url"):
             ddns = DdnsManager(
-                "http://localhost/", "unused", cfg["ddns_d2_url"],
+                "http://localhost/",
+                "unused",
+                cfg["ddns_d2_url"],
                 username=cfg.get("ddns_d2_username"),
                 password=cfg.get("ddns_d2_password"),
-                zone_source=_orm_zone_names)
+                zone_source=_orm_zone_names,
+            )
 
         if not options["no_initial_sync"]:
             if conn:
@@ -140,18 +163,20 @@ class Command(BaseCommand):
             for p in pollers:
                 try:
                     p.sync_once()
-                except Exception as e:
-                    logger.error("initial lease poll (%s) failed: %s",
-                                 p.name, e)
+                except Exception as e:  # noqa: PERF203 — per-poller isolation
+                    logger.error("initial lease poll (%s) failed: %s", p.name, e)
 
         if options["once"]:
             return
 
         for p in pollers:
-            logger.info("lease-poll: observing %s every %ss",
-                        p.name, p.interval)
-            threading.Thread(target=p.run_forever, daemon=True,
-                             name=f"lease-poll-{p.name}").start()
+            logger.info("lease-poll: observing %s every %ss", p.name, p.interval)
+            threading.Thread(
+                target=_poll_forever,
+                args=(p,),
+                daemon=True,
+                name=f"lease-poll-{p.name}",
+            ).start()
 
         dispatch = {}
         if conn:
@@ -179,10 +204,10 @@ class Command(BaseCommand):
                 if ev.kind == "server":
                     # registry changed: restart-to-apply. Consume the
                     # queue up to this point first.
-                    SyncEvent.objects.filter(
-                        id__in=[e.id for e in events]).delete()
-                    logger.info("Server registry changed; exiting for "
-                                "re-initialization")
+                    SyncEvent.objects.filter(id__in=[e.id for e in events]).delete()
+                    logger.info(
+                        "Server registry changed; exiting for re-initialization"
+                    )
                     sys.exit(0)
                 elif ev.kind == "zone":
                     if ddns:
@@ -195,12 +220,24 @@ class Command(BaseCommand):
                         dispatch[ev.kind](ev.object_id)
                         touched_sync = True
                     except Exception as e:
-                        logger.error("sync_%s(%s) failed: %s",
-                                     ev.kind, ev.object_id, e)
+                        logger.error("sync_%s(%s) failed: %s", ev.kind, ev.object_id, e)
             if conn and touched_sync:
                 conn.push_to_dhcp()
-            SyncEvent.objects.filter(
-                id__in=[e.id for e in events]).delete()
+            SyncEvent.objects.filter(id__in=[e.id for e in events]).delete()
+
+
+def _poll_forever(poller):
+    """Poll loop with Django connection hygiene: keasync's run_forever
+    is ORM-agnostic and would keep a stale DB connection after e.g. a
+    CNPG failover, silently halting that Server's reflection forever."""
+
+    while True:
+        close_old_connections()
+        try:
+            poller.sync_once()
+        except Exception as e:
+            logger.error("lease-poll %s failed: %s", poller.name, e)
+        time.sleep(poller.interval)
 
 
 def _orm_zone_names():
@@ -209,6 +246,7 @@ def _orm_zone_names():
     from netbox_dns.models import Zone
 
     return [
-        z.name for z in Zone.objects.filter(status="active")
+        z.name
+        for z in Zone.objects.filter(status="active")
         if (z.custom_field_data or {}).get("ddns_enabled")
     ]
