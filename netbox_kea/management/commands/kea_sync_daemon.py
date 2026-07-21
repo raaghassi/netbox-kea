@@ -174,7 +174,10 @@ class Command(BaseCommand):
         if not options["no_initial_sync"]:
             if conn:
                 logger.info("initial full sync")
-                conn.sync_all()
+                try:
+                    conn.sync_all()
+                except Exception as e:
+                    logger.error("initial full sync failed: %s", e)
             if ddns:
                 try:
                     ddns.sync()
@@ -242,7 +245,10 @@ class Command(BaseCommand):
                     except Exception as e:
                         logger.error("sync_%s(%s) failed: %s", ev.kind, ev.object_id, e)
             if conn and touched_sync:
-                conn.push_to_dhcp()
+                try:
+                    conn.push_to_dhcp()
+                except Exception as e:
+                    logger.error("push to Kea failed: %s", e)
             SyncEvent.objects.filter(id__in=[e.id for e in events]).delete()
 
 

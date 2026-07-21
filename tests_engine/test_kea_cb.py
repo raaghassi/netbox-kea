@@ -4,7 +4,7 @@ from unittest.mock import Mock
 
 from keasync.kea.api import DHCP4API
 from keasync.kea.cb import DHCP4CB
-from keasync.kea.exceptions import KeaCmdError
+from keasync.kea.exceptions import KeaCmdError, KeaError
 
 MAC = bytes.fromhex('112233445566')
 
@@ -201,7 +201,8 @@ class TestDHCP4CBStagedMutations(unittest.TestCase):
                 'user-context': {'netbox_ip_address_id': 200}}]}]}
         self.kea._has_commit = True
         self.kea._pending_lease_dels.add('10.0.0.4')
-        # push() now validates the applied config: served subnets match
+        # _pulled_cb_key None (no pull) -> validation runs (fail-safe)
+        self.kea.api.config_backend_pull.return_value = True
         self.kea.api.subnet4_list.return_value = [
             {'id': 100, 'subnet': '10.0.0.0/24'}]
         self.kea.push()
@@ -209,6 +210,19 @@ class TestDHCP4CBStagedMutations(unittest.TestCase):
         self.kea.api.del_lease4.assert_called_once_with('10.0.0.4')
         self.kea.api.config_backend_pull.assert_called_once_with()
         self.assertEqual(self.kea._pending_lease_dels, set())
+
+    def test_06_unchanged_cb_push_skips_forced_pull(self):
+        # when the CB content matches the last pull, push must NOT force a
+        # config-backend-pull (reservation-only / no-op sync)
+        subnet = {'id': 100, 'subnet': '10.0.0.0/24', 'pools': [],
+                  'reservations': []}
+        cursor = _FakeCursor([[], [(1,)], [], [], [], [], [], [], []])
+        self.kea._connect = lambda: _FakeConn(cursor)
+        self.kea.commit_conf = {'subnet4': [subnet]}
+        self.kea._pulled_cb_key = DHCP4CB._cb_content_key([subnet])
+        self.kea._has_commit = True
+        self.kea.push()
+        self.kea.api.config_backend_pull.assert_not_called()
 
     def test_05_push_without_api_skips_reconcile(self):
         kea = DHCP4CB('dbname=kea')
@@ -323,20 +337,30 @@ class TestDHCP4APIReservationCommands(unittest.TestCase):
         self._respond(3, '0 IPv4 lease(s) found.')
         self.assertEqual(self.api.get_leases_page('start', 1024), [])
 
-    def test_10_config_backend_pull_ok(self):
+    def test_10_config_backend_pull_ok_returns_true(self):
         self._respond(0, 'On demand configuration update successful.')
-        self.api.config_backend_pull()  # no raise
+        self.assertIs(self.api.config_backend_pull(), True)
         self.assertEqual(
             self.api.session.post.call_args.kwargs['json']['command'],
             'config-backend-pull')
 
-    def test_11_config_backend_pull_no_cb_result3(self):
+    def test_11_config_backend_pull_no_cb_returns_false(self):
         self._respond(3, 'No config backend.')
-        self.api.config_backend_pull()  # tolerated, no raise
+        self.assertIs(self.api.config_backend_pull(), False)
 
     def test_12_config_backend_pull_failure_raises(self):
         self._respond(1, 'unable to fetch: bad subnet')
         with self.assertRaises(KeaCmdError):
+            self.api.config_backend_pull()
+
+    def test_15_malformed_response_raises_keaerror(self):
+        # a response array not of length 1 must raise a KeaError subclass,
+        # not a bare AssertionError that would escape uncaught
+        resp = Mock()
+        resp.raise_for_status = Mock()
+        resp.json.return_value = []  # empty / unexpected
+        self.api.session.post.return_value = resp
+        with self.assertRaises(KeaError):
             self.api.config_backend_pull()
 
     def test_13_subnet4_list_ok(self):
@@ -373,6 +397,7 @@ class TestDHCP4CBValidateApplied(unittest.TestCase):
     def setUp(self):
         self.kea = DHCP4CB('dbname=kea', api_url='http://kea:8000/')
         self.kea.api = Mock()
+        self.kea.api.config_backend_pull.return_value = True  # applied
         self.desired = [{'id': 4, 'subnet': '172.16.24.0/23', 'pools': []}]
 
     def test_01_pull_ok_and_served_matches_no_error(self):
@@ -388,6 +413,25 @@ class TestDHCP4CBValidateApplied(unittest.TestCase):
             self.kea._validate_applied(self.desired)
         self.assertIn('NOT applied', ' '.join(cm.output))
         self.kea.api.subnet4_list.assert_not_called()
+
+    def test_02b_no_cb_backend_one_error_not_per_subnet_flood(self):
+        # config-backend-pull result 3 (no CB) -> one clear error, no diff
+        self.kea.api.config_backend_pull.return_value = False
+        with self.assertLogs(level='ERROR') as cm:
+            self.kea._validate_applied(self.desired)
+        self.assertEqual(len(cm.output), 1)
+        self.assertIn('no config backend', ' '.join(cm.output))
+        self.kea.api.subnet4_list.assert_not_called()
+
+    def test_05_noncanonical_cidr_not_flagged_divergent(self):
+        # Kea renders canonical CIDR; a non-canonical desired string must
+        # not read as divergence after normalization
+        self.kea.api.config_backend_pull.return_value = True
+        self.kea.api.subnet4_list.return_value = [
+            {'id': 4, 'subnet': '172.16.24.0/23'}]
+        desired = [{'id': 4, 'subnet': '172.16.24.5/23', 'pools': []}]
+        with self.assertNoLogs(level='ERROR'):
+            self.kea._validate_applied(desired)
 
     def test_03_missing_desired_subnet_logs_divergence(self):
         self.kea.api.subnet4_list.return_value = []  # Kea serves nothing

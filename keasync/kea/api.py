@@ -136,22 +136,12 @@ class DHCP4API:
         else:
             raise KeaCmdError(f'command "reservation-del" returns "{text}"')
 
-    def config_backend_pull(self):
-        """Force Kea to fetch+apply pending config-backend changes NOW.
+    def _single_response(self, command, payload):
+        """POST one command, return its single response map. A response
+        array not of length 1 (CA misconfig, reshaping proxy) raises
+        KeaServerError — a KeaError subclass callers already handle —
+        rather than a bare AssertionError that would escape uncaught."""
 
-        config-backend-pull runs a synchronous incremental fetch (the same
-        audit-trail merge as the periodic config-fetch timer). Returns:
-          - result 0: Kea merged the pending CB audit entries into its live
-            config — our write is APPLIED (not just written to the DB).
-          - result 3: no config backend configured (returns without error;
-            nothing to validate).
-          - result 1: the fetch/apply FAILED — raised as KeaCmdError. This
-            surfaces a bad CB write synchronously here, instead of it
-            surfacing minutes later in the kea-dhcp4 logs, and before the
-            periodic-fetch retry counter exhausts (10 consecutive failures
-            permanently halt CB polling until Kea restarts)."""
-
-        payload = {'command': 'config-backend-pull', 'service': ['dhcp4']}
         try:
             r = self.session.post(self.url, json=payload,
                                   timeout=self.timeout)
@@ -159,16 +149,39 @@ class DHCP4API:
             rj = r.json()
         except requests.exceptions.RequestException as e:
             raise KeaServerError(f'API error: {e}')
-        assert len(rj) == 1
-        rj = rj.pop(0)
+        if not isinstance(rj, list) or len(rj) != 1:
+            raise KeaServerError(
+                f'command "{command}": expected 1 response, got {rj!r}')
+        return rj[0]
+
+    def config_backend_pull(self):
+        """Force Kea to fetch+apply pending config-backend changes NOW.
+
+        config-backend-pull runs a synchronous incremental fetch (the same
+        audit-trail merge as the periodic config-fetch timer). Returns:
+          - True (result 0): Kea merged the pending CB audit entries into
+            its live config — our write is APPLIED (not just DB-committed).
+          - False (result 3): no config backend configured on this Kea —
+            for a cb-mode Server this is a misconfiguration; the caller
+            skips the subnet readback (which would misreport every subnet
+            as divergent against Kea's non-CB config).
+          - result 1: the fetch/apply FAILED — raised as KeaCmdError,
+            surfacing a bad CB write synchronously here instead of minutes
+            later in the kea-dhcp4 logs (and before the periodic-fetch
+            retry counter exhausts, which permanently halts CB polling)."""
+
+        rj = self._single_response(
+            'config-backend-pull',
+            {'command': 'config-backend-pull', 'service': ['dhcp4']})
         result, text = rj['result'], rj.get('text')
         if result == 0:
             logging.debug(f'config-backend-pull: {text}')
-        elif result == 3:
+            return True
+        if result == 3:
             logging.warning(f'config-backend-pull: {text}')
-        else:
-            raise KeaCmdError(
-                f'command "config-backend-pull" returns "{text}"')
+            return False
+        raise KeaCmdError(
+            f'command "config-backend-pull" returns "{text}"')
 
     def subnet4_list(self):
         """Subnets Kea is CURRENTLY serving (subnet4-list, subnet_cmds).
@@ -178,16 +191,9 @@ class DHCP4API:
         shows the applied subnets. Returns a list of {'id', 'subnet',
         ...}; result 3 ('empty') yields []."""
 
-        payload = {'command': 'subnet4-list', 'service': ['dhcp4']}
-        try:
-            r = self.session.post(self.url, json=payload,
-                                  timeout=self.timeout)
-            r.raise_for_status()
-            rj = r.json()
-        except requests.exceptions.RequestException as e:
-            raise KeaServerError(f'API error: {e}')
-        assert len(rj) == 1
-        rj = rj.pop(0)
+        rj = self._single_response(
+            'subnet4-list',
+            {'command': 'subnet4-list', 'service': ['dhcp4']})
         result = rj['result']
         if result in (0, 3):
             return (rj.get('arguments') or {}).get('subnets', [])

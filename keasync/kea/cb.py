@@ -64,6 +64,18 @@ SERVER_TAG = 'all'
 HW_ADDRESS_TYPE = 0
 
 
+def _norm_cidr(prefix):
+    """Canonicalize a subnet string for readback comparison, so NetBox's
+    prefix and Kea's subnet4-list rendering never diverge on formatting
+    (host bits, leading zeros). Falls back to the raw value if unparseable."""
+
+    try:
+        from ipaddress import ip_network
+        return str(ip_network(prefix, strict=False))
+    except (ValueError, TypeError):
+        return prefix
+
+
 class DHCP4CB(DHCP4App):
 
     def __init__(self, dsn, api_url=None, api_username=None,
@@ -81,6 +93,9 @@ class DHCP4CB(DHCP4App):
         # Lease evictions recorded by the in-memory reservation logic;
         # flushed by push() so check-only runs never mutate the live server.
         self._pending_lease_dels = set()
+        # CB-config snapshot from the last pull(); push() compares against it
+        # to skip the forced config-backend-pull on unchanged syncs.
+        self._pulled_cb_key = None
         self.conf = None
         self.commit_conf = None
         self._has_commit = False
@@ -148,11 +163,35 @@ class DHCP4CB(DHCP4App):
 
         self.conf = {SUBNETS: list(subnets.values())}
         self.commit_conf = deepcopy(self.conf)
+        # Snapshot the CB-config content (subnets/pools/options, NOT
+        # reservations) so push() can tell whether a sync actually changed
+        # the config backend — and skip the forced, Kea-blocking
+        # config-backend-pull when it didn't (e.g. a reservation-only sync).
+        self._pulled_cb_key = self._cb_content_key(self.conf[SUBNETS])
         # A pull resynchronizes from the DB: any staged-but-unpushed commit
         # is now stale, so discard it (pull acts as rollback) — including
         # lease evictions staged by the discarded reservation changes.
         self._has_commit = False
         self._pending_lease_dels.clear()
+
+    @staticmethod
+    def _cb_content_key(subnets):
+        """Canonical, comparable snapshot of the CB config a push writes —
+        subnet scalars + pools + options — EXCLUDING reservations (host_cmds,
+        reconciled separately). Equal keys ⇒ the config backend is unchanged.
+        Order-independent so pool/option ordering never reads as a change."""
+
+        key = []
+        for s in subnets:
+            scalars = tuple(sorted(
+                (k, v) for k, v in s.items()
+                if k in SCALAR_COLS))
+            pools = tuple(sorted(p.get('pool', '') for p in s.get(POOLS, [])))
+            opts = tuple(sorted(
+                (o.get('name'), o.get('data'))
+                for o in s.get('option-data', [])))
+            key.append((s[PREFIX], s['subnet'], scalars, pools, opts))
+        return sorted(key)
 
     @staticmethod
     def _fetch_reservations(cur):
@@ -261,9 +300,14 @@ class DHCP4CB(DHCP4App):
                 except KeaError as e:
                     logging.error(f'lease4-del {ip} failed: {e}')
             self._pending_lease_dels.clear()
-            # Confirm Kea actually applied the CB write (the DB commit above
-            # only proves the DB accepted it, not that Kea fetched it).
-            self._validate_applied(desired)
+            # Confirm Kea actually applied the CB write — but only when this
+            # push CHANGED the config backend. config-backend-pull forces a
+            # synchronous fetch that briefly blocks Kea's command thread, so
+            # a reservation-only or no-op sync must not trigger it. Unknown
+            # prior state (no pull) fails safe toward validating.
+            desired_key = self._cb_content_key(desired)
+            if getattr(self, '_pulled_cb_key', None) != desired_key:
+                self._validate_applied(desired)
 
     def _validate_applied(self, desired):
         """Post-write validation: force Kea to fetch+apply the CB write and
@@ -281,7 +325,7 @@ class DHCP4CB(DHCP4App):
         fixed), and the reconcile re-derives from NetBox on the next sync."""
 
         try:
-            self.api.config_backend_pull()
+            applied = self.api.config_backend_pull()
         except KeaError as e:
             logging.error(
                 'CB write NOT applied by Kea (config-backend-pull failed): '
@@ -289,13 +333,23 @@ class DHCP4CB(DHCP4App):
                 'fetch; check the kea-dhcp4 logs for the offending element',
                 e)
             return
+        if not applied:
+            # result 3: this Kea has no config-backend stanza at all, yet
+            # the Server is cb-mode. One clear diagnostic instead of a
+            # per-subnet divergence flood against Kea's non-CB config.
+            logging.error(
+                'CB write NOT applied: Kea reports no config backend '
+                '(config-backend-pull result 3) — this Server is cb-mode but '
+                'its Kea instance has no config-backend configured; check the '
+                'control URL and the Kea config-control block')
+            return
         try:
-            served = {s.get('id'): s.get('subnet')
+            served = {s.get('id'): _norm_cidr(s.get('subnet'))
                       for s in self.api.subnet4_list()}
         except KeaError as e:
             logging.error('post-write readback (subnet4-list) failed: %s', e)
             return
-        desired_map = {s[PREFIX]: s['subnet'] for s in desired}
+        desired_map = {s[PREFIX]: _norm_cidr(s['subnet']) for s in desired}
         for sid, prefix in desired_map.items():
             if served.get(sid) != prefix:
                 logging.error(
