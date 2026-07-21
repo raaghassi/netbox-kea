@@ -53,6 +53,20 @@ jobs:
         env:
           NETBOX_CONTAINER_TAG: ${{ matrix.netbox }}
 
+      # ORM/logic unit tests (netbox_kea/tests/) inside a NetBox container
+      # against the compose postgres — the Django-dependent code the
+      # framework-free engine tests can't reach. Also catches migration
+      # drift. Mirrors the netbox-community plugin convention.
+      - name: Run plugin unit tests + migration check
+        working-directory: ./tests/docker/
+        run: |
+          docker compose run --rm netbox \
+            /opt/netbox/venv/bin/python /opt/netbox/netbox/manage.py \
+            makemigrations netbox_kea --check --dry-run
+          docker compose run --rm netbox \
+            /opt/netbox/venv/bin/python /opt/netbox/netbox/manage.py \
+            test netbox_kea -v 2
+
       - name: Run pytest
         run: |
           uv run pytest --tracing=retain-on-failure -v
