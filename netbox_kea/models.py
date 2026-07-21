@@ -3,7 +3,6 @@ from typing import Literal
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.core.validators import MinValueValidator
 from django.db import models
 from django.urls import reverse
 from netbox.constants import CENSOR_TOKEN, CENSOR_TOKEN_CHANGED
@@ -93,8 +92,12 @@ class Server(NetBoxModel):
     )
     poll_interval = models.PositiveIntegerField(
         default=60,
-        validators=[MinValueValidator(1)],
-        help_text="Lease-poll interval in seconds (observe mode).",
+        help_text=(
+            "Lease-reflection poll interval in seconds. Applies to every "
+            "mode — cb/agent Servers reflect leases by polling too, in "
+            "addition to their config sync. 0 disables lease reflection "
+            "for this Server (sync-only)."
+        ),
     )
 
     class Meta:

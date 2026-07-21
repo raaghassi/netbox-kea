@@ -86,7 +86,12 @@ def build_registry():
             backends[name] = DHCP4App(
                 srv.dhcp4_url, username=srv.username, password=password
             )
-        elif srv.mode == ServerModeChoices.MODE_OBSERVE:
+        # Lease reflection by polling the control socket — for EVERY mode,
+        # not just observe: cb/agent Servers get a poller in addition to
+        # their write backend (unified reflection, no kea-side NetBox
+        # token / run_script hook). poll_interval is per-Server; 0 disables
+        # reflection for that Server (sync-only).
+        if srv.dhcp4_url and srv.poll_interval > 0:
             pollers.append(
                 LeasePoller(
                     name,
