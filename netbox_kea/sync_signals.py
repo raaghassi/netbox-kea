@@ -10,6 +10,8 @@ Registered from NetBoxKeaConfig.ready().
 """
 
 import logging
+import threading
+from contextlib import contextmanager
 
 from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
@@ -17,6 +19,25 @@ from django.dispatch import receiver
 from .models import Server, SyncEvent
 
 logger = logging.getLogger("netbox_kea.sync_signals")
+
+# The daemon's OWN lease-reflection writes (OrmAdapter.upsert_dhcp_ip /
+# delete_dhcp_ip on status=dhcp IPs) must NOT re-enter the sync pipeline:
+# a reflected lease has no MAC, so sync_ipaddress would del_resa it,
+# flipping _has_commit and forcing a full CB rewrite per lease change.
+# suppress_sync() (used by OrmAdapter around those writes) makes the
+# signal handler skip enqueueing for the current thread.
+_suppress = threading.local()
+
+
+@contextmanager
+def suppress_sync():
+    prev = getattr(_suppress, "active", False)
+    _suppress.active = True
+    try:
+        yield
+    finally:
+        _suppress.active = prev
+
 
 # model label -> event kind (Connector.sync_<kind> / daemon dispatch)
 _KINDS = {
@@ -36,6 +57,8 @@ def _enqueue(kind, object_id):
 
 
 def _handler(sender, instance, **kwargs):
+    if getattr(_suppress, "active", False):
+        return
     label = sender._meta.label_lower
     kind = _KINDS.get(label)
     if kind:

@@ -20,6 +20,8 @@ from ipam.filtersets import (
 )
 from ipam.models import IPAddress, IPRange, Prefix
 
+from .sync_signals import suppress_sync
+
 logger = logging.getLogger("netbox_kea.sync_adapter")
 
 
@@ -67,7 +69,11 @@ class _IPAddressView:
         self._obj = obj
 
     def delete(self):
-        self._obj.delete()
+        # The lease poller removes stale reflected leases through this
+        # path; suppress so the post_delete doesn't re-enter the sync
+        # pipeline (see the reflection note on OrmAdapter below).
+        with suppress_sync():
+            self._obj.delete()
 
     def __str__(self):
         return self.address
@@ -155,31 +161,40 @@ class OrmAdapter:
         return (_IPAddressView(o) for o in qs)
 
     # --- lease reflection (status=dhcp population only) ---
+    #
+    # These are the daemon's OWN writes reflecting Kea's live leases into
+    # NetBox. They run inside suppress_sync() so their post_save/post_delete
+    # signals do NOT enqueue SyncEvents — otherwise a reflected lease
+    # (status=dhcp, no MAC) would drive sync_ipaddress -> del_resa ->
+    # _has_commit -> a full CB rewrite on every lease change. Operator-made
+    # status=dhcp edits still sync (they don't run under suppress_sync).
 
     def upsert_dhcp_ip(self, address, dns_name=None, description=None):
         """Reflection semantics (see keasync): dns_name/description mirror
         the CURRENT lease state — None clears."""
-        existing = IPAddress.objects.filter(address=address, status="dhcp").first()
-        if existing:
-            existing.dns_name = dns_name or ""
-            existing.description = description or ""
-            # scoped save: a full-row save() would lose concurrent edits
-            # to other fields; last_updated is auto_now and Django skips
-            # auto_now fields omitted from update_fields
-            existing.save(update_fields=["dns_name", "description", "last_updated"])
-            return _IPAddressView(existing)
-        obj = IPAddress(
-            address=address,
-            status="dhcp",
-            dns_name=dns_name or "",
-            description=description or "",
-        )
-        obj.save()
-        return _IPAddressView(obj)
+        with suppress_sync():
+            existing = IPAddress.objects.filter(address=address, status="dhcp").first()
+            if existing:
+                existing.dns_name = dns_name or ""
+                existing.description = description or ""
+                # scoped save: a full-row save() would lose concurrent edits
+                # to other fields; last_updated is auto_now and Django skips
+                # auto_now fields omitted from update_fields
+                existing.save(update_fields=["dns_name", "description", "last_updated"])
+                return _IPAddressView(existing)
+            obj = IPAddress(
+                address=address,
+                status="dhcp",
+                dns_name=dns_name or "",
+                description=description or "",
+            )
+            obj.save()
+            return _IPAddressView(obj)
 
     def delete_dhcp_ip(self, address):
-        for ip in IPAddress.objects.filter(address=address, status="dhcp"):
-            ip.delete()
+        with suppress_sync():
+            for ip in IPAddress.objects.filter(address=address, status="dhcp"):
+                ip.delete()
 
     def dhcp_ips(self):
         return (_IPAddressView(o) for o in IPAddress.objects.filter(status="dhcp"))
