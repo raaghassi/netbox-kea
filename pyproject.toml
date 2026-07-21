@@ -85,3 +85,15 @@ ignore = [
   "ISC001",
   "ISC002",
 ]
+
+[tool.pytest.ini_options]
+# The host-level `uv run pytest` covers the two suites that import no
+# Django/NetBox: tests/ (Playwright e2e, reach NetBox over HTTP) and
+# tests_engine/ (framework-free unit tests). netbox_kea/tests/ is
+# deliberately excluded here — those ORM tests import `netbox`, which only
+# exists inside the NetBox container, so they run via `manage.py test
+# netbox_kea` (see the CI "plugin unit tests" step), not this runner.
+testpaths = [
+  "tests",
+  "tests_engine",
+]
