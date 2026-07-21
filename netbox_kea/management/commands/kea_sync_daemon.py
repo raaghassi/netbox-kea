@@ -14,6 +14,7 @@ codebase and ORM. Replaces the standalone netbox-kea-dhcp syncer:
 """
 
 import logging
+import os
 import sys
 import threading
 import time
@@ -42,6 +43,24 @@ def _cfg():
     return settings.PLUGINS_CONFIG["netbox_kea"]
 
 
+def _server_password(srv):
+    """Control-socket password for a Server.
+
+    Explicit Server.password wins (external, UI-created instances set it
+    in the NetBox UI). When a Server declares a username but stores no
+    password, fall back to the daemon's KEA_CTRL_PASSWORD env — this is
+    how cluster instances authenticate WITHOUT their password sitting in
+    NetBox's database (the seed leaves Server.password empty). No
+    username means the instance's control socket has no auth.
+    """
+
+    if srv.password:
+        return srv.password
+    if srv.username:
+        return os.environ.get("KEA_CTRL_PASSWORD")
+    return None
+
+
 def build_registry():
     """(backends, default_tag, pollers) from Server rows.
 
@@ -55,16 +74,17 @@ def build_registry():
     backends, pollers = {}, []
     for srv in Server.objects.all():
         name = srv.name.strip().lower()
+        password = _server_password(srv)
         if srv.mode == ServerModeChoices.MODE_CB:
             backends[name] = DHCP4CB(
                 srv.cb_dsn,
                 api_url=srv.dhcp4_url,
                 api_username=srv.username,
-                api_password=srv.password,
+                api_password=password,
             )
         elif srv.mode == ServerModeChoices.MODE_AGENT:
             backends[name] = DHCP4App(
-                srv.dhcp4_url, username=srv.username, password=srv.password
+                srv.dhcp4_url, username=srv.username, password=password
             )
         elif srv.mode == ServerModeChoices.MODE_OBSERVE:
             pollers.append(
@@ -73,7 +93,7 @@ def build_registry():
                     srv.dhcp4_url,
                     OrmAdapter(),
                     username=srv.username,
-                    password=srv.password,
+                    password=password,
                     interval=srv.poll_interval,
                 )
             )
