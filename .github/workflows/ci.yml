@@ -24,7 +24,6 @@ jobs:
     strategy:
       matrix:
         include:
-          - netbox: v4.4
           - netbox: v4.5
 
     runs-on: ubuntu-latest
