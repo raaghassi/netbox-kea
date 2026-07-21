@@ -3,12 +3,32 @@ from typing import Literal
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
+from django.core.validators import MinValueValidator
 from django.db import models
 from django.urls import reverse
 from netbox.constants import CENSOR_TOKEN, CENSOR_TOKEN_CHANGED
 from netbox.models import NetBoxModel
 
+from .choices import ServerModeChoices
 from .kea import KeaClient
+
+
+class SyncEvent(models.Model):
+    """Journal row feeding the kea-sync daemon (the netbox_dns_bridge
+    changelog pattern): signal receivers append rows on relevant model
+    changes, the daemon consumes them in id order and dispatches the
+    corresponding incremental sync. Rows are deleted on consumption —
+    this is a queue, not an audit trail (NetBox's changelog is that)."""
+
+    kind = models.CharField(max_length=32)
+    object_id = models.BigIntegerField()
+    created = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("id",)
+
+    def __str__(self):
+        return f"{self.kind} {self.object_id}"
 
 
 class Server(NetBoxModel):
@@ -47,6 +67,35 @@ class Server(NetBoxModel):
         verbose_name="CA File Path",
         help_text="The specific CA certificate file to use for SSL verification.",
     )
+    # kea-sync daemon fields. The default is observe: an unconfigured or
+    # freshly-migrated Server must never become a sync target implicitly —
+    # sync targets are converged to what NetBox defines.
+    mode = models.CharField(
+        max_length=16,
+        choices=ServerModeChoices,
+        default=ServerModeChoices.MODE_OBSERVE,
+        help_text=(
+            "How the kea-sync daemon treats this instance: cb/agent are "
+            "sync targets (converged to NetBox-defined config); observe "
+            "is lease reflection only and is never written to."
+        ),
+    )
+    cb_dsn = models.CharField(
+        max_length=1024,
+        null=True,
+        blank=True,
+        verbose_name="Config backend DSN",
+        help_text=(
+            "libpq DSN of this instance's PostgreSQL config backend "
+            "(cb mode). Password-free by design: the daemon supplies "
+            "credentials via PG* environment variables."
+        ),
+    )
+    poll_interval = models.PositiveIntegerField(
+        default=60,
+        validators=[MinValueValidator(1)],
+        help_text="Lease-poll interval in seconds (observe mode).",
+    )
 
     class Meta:
         ordering = ("name",)
@@ -78,6 +127,23 @@ class Server(NetBoxModel):
         if self.dhcp4_url is None and self.dhcp6_url is None:
             raise ValidationError(
                 {"dhcp6_url": "At one DHCPv4 URL or DHCPv6 URL needs to be provided."}
+            )
+
+        if self.mode == ServerModeChoices.MODE_CB and not self.cb_dsn:
+            raise ValidationError(
+                {"cb_dsn": "cb mode requires the config backend DSN."}
+            )
+        if self.mode in (
+            ServerModeChoices.MODE_CB,
+            ServerModeChoices.MODE_AGENT,
+        ) and not self.dhcp4_url:
+            raise ValidationError(
+                {
+                    "dhcp4_url": (
+                        "cb/agent modes require the DHCPv4 control URL "
+                        "(the kea-sync daemon's command channel)."
+                    )
+                }
             )
 
         if (self.client_cert_path and not self.client_key_path) or (

@@ -14,6 +14,9 @@ class ServerSerializer(NetBoxModelSerializer):
         fields = (
             "id",
             "name",
+            "mode",
+            "cb_dsn",
+            "poll_interval",
             "username",
             "password",
             "ssl_verify",

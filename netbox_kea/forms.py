@@ -16,8 +16,11 @@ class ServerForm(NetBoxModelForm):
         model = Server
         fields = (
             "name",
+            "mode",
             "dhcp4_url",
             "dhcp6_url",
+            "cb_dsn",
+            "poll_interval",
             "username",
             "password",
             "ssl_verify",

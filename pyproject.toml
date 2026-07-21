@@ -11,6 +11,8 @@ authors = [
 dependencies = [
   "requests>=2.0.0,<3.0.0",
   "netaddr>=0.8,<2.0.0",
+  # keasync CB writer (direct config-backend SQL)
+  "psycopg>=3.1",
 ]
 
 [dependency-groups]
@@ -33,6 +35,13 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.sdist]
 include = [
   "netbox_kea",
+  "keasync",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = [
+  "netbox_kea",
+  "keasync",
 ]
 
 [tool.ruff]
