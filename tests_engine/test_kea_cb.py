@@ -201,9 +201,13 @@ class TestDHCP4CBStagedMutations(unittest.TestCase):
                 'user-context': {'netbox_ip_address_id': 200}}]}]}
         self.kea._has_commit = True
         self.kea._pending_lease_dels.add('10.0.0.4')
+        # push() now validates the applied config: served subnets match
+        self.kea.api.subnet4_list.return_value = [
+            {'id': 100, 'subnet': '10.0.0.0/24'}]
         self.kea.push()
         self.kea.api.add_reservation.assert_called_once()
         self.kea.api.del_lease4.assert_called_once_with('10.0.0.4')
+        self.kea.api.config_backend_pull.assert_called_once_with()
         self.assertEqual(self.kea._pending_lease_dels, set())
 
     def test_05_push_without_api_skips_reconcile(self):
@@ -319,6 +323,36 @@ class TestDHCP4APIReservationCommands(unittest.TestCase):
         self._respond(3, '0 IPv4 lease(s) found.')
         self.assertEqual(self.api.get_leases_page('start', 1024), [])
 
+    def test_10_config_backend_pull_ok(self):
+        self._respond(0, 'On demand configuration update successful.')
+        self.api.config_backend_pull()  # no raise
+        self.assertEqual(
+            self.api.session.post.call_args.kwargs['json']['command'],
+            'config-backend-pull')
+
+    def test_11_config_backend_pull_no_cb_result3(self):
+        self._respond(3, 'No config backend.')
+        self.api.config_backend_pull()  # tolerated, no raise
+
+    def test_12_config_backend_pull_failure_raises(self):
+        self._respond(1, 'unable to fetch: bad subnet')
+        with self.assertRaises(KeaCmdError):
+            self.api.config_backend_pull()
+
+    def test_13_subnet4_list_ok(self):
+        resp = Mock()
+        resp.raise_for_status = Mock()
+        resp.json.return_value = [{
+            'result': 0, 'text': '1 IPv4 subnets found',
+            'arguments': {'subnets': [{'id': 4, 'subnet': '172.16.24.0/23'}]}}]
+        self.api.session.post.return_value = resp
+        self.assertEqual(self.api.subnet4_list(),
+                         [{'id': 4, 'subnet': '172.16.24.0/23'}])
+
+    def test_14_subnet4_list_empty_result3(self):
+        self._respond(3, '0 IPv4 subnets found')
+        self.assertEqual(self.api.subnet4_list(), [])
+
     def test_09_get_leases_page_error_raises(self):
         self._respond(1, 'malformed')
         with self.assertRaises(KeaCmdError):
@@ -332,3 +366,40 @@ class TestDHCP4APIReservationCommands(unittest.TestCase):
     def test_06_no_auth_by_default(self):
         api = DHCP4API('http://kea:8000/')
         self.assertIsNone(api.session.auth)
+
+
+class TestDHCP4CBValidateApplied(unittest.TestCase):
+
+    def setUp(self):
+        self.kea = DHCP4CB('dbname=kea', api_url='http://kea:8000/')
+        self.kea.api = Mock()
+        self.desired = [{'id': 4, 'subnet': '172.16.24.0/23', 'pools': []}]
+
+    def test_01_pull_ok_and_served_matches_no_error(self):
+        self.kea.api.subnet4_list.return_value = [
+            {'id': 4, 'subnet': '172.16.24.0/23'}]
+        with self.assertNoLogs(level='ERROR'):
+            self.kea._validate_applied(self.desired)
+        self.kea.api.config_backend_pull.assert_called_once_with()
+
+    def test_02_pull_failure_logs_and_skips_readback(self):
+        self.kea.api.config_backend_pull.side_effect = KeaCmdError('bad row')
+        with self.assertLogs(level='ERROR') as cm:
+            self.kea._validate_applied(self.desired)
+        self.assertIn('NOT applied', ' '.join(cm.output))
+        self.kea.api.subnet4_list.assert_not_called()
+
+    def test_03_missing_desired_subnet_logs_divergence(self):
+        self.kea.api.subnet4_list.return_value = []  # Kea serves nothing
+        with self.assertLogs(level='ERROR') as cm:
+            self.kea._validate_applied(self.desired)
+        self.assertIn('divergence', ' '.join(cm.output))
+        self.assertIn('id=4', ' '.join(cm.output))
+
+    def test_04_unexpected_extra_subnet_logs_divergence(self):
+        self.kea.api.subnet4_list.return_value = [
+            {'id': 4, 'subnet': '172.16.24.0/23'},
+            {'id': 9, 'subnet': '10.9.0.0/24'}]  # stale, not desired
+        with self.assertLogs(level='ERROR') as cm:
+            self.kea._validate_applied(self.desired)
+        self.assertIn('id=9', ' '.join(cm.output))

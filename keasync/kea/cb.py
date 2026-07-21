@@ -261,6 +261,50 @@ class DHCP4CB(DHCP4App):
                 except KeaError as e:
                     logging.error(f'lease4-del {ip} failed: {e}')
             self._pending_lease_dels.clear()
+            # Confirm Kea actually applied the CB write (the DB commit above
+            # only proves the DB accepted it, not that Kea fetched it).
+            self._validate_applied(desired)
+
+    def _validate_applied(self, desired):
+        """Post-write validation: force Kea to fetch+apply the CB write and
+        confirm it took effect.
+
+        The CB is pull-based and asynchronous — committing rows to the DB
+        does not mean Kea is serving them. config-backend-pull forces an
+        immediate synchronous fetch (also removing the up-to-fetch-timer
+        propagation delay); its failure means Kea REJECTED the write (bad
+        config) and is surfaced here, loudly, instead of silently in the
+        kea-dhcp4 logs. subnet4-list then confirms the served subnet set
+        matches what we wrote — catching silent divergence a bare success
+        would miss. Failures are logged, never raised: the write is durable
+        in the CB (Kea self-heals via the periodic timer once the source is
+        fixed), and the reconcile re-derives from NetBox on the next sync."""
+
+        try:
+            self.api.config_backend_pull()
+        except KeaError as e:
+            logging.error(
+                'CB write NOT applied by Kea (config-backend-pull failed): '
+                '%s — rows are in the config backend but Kea rejected the '
+                'fetch; check the kea-dhcp4 logs for the offending element',
+                e)
+            return
+        try:
+            served = {s.get('id'): s.get('subnet')
+                      for s in self.api.subnet4_list()}
+        except KeaError as e:
+            logging.error('post-write readback (subnet4-list) failed: %s', e)
+            return
+        desired_map = {s[PREFIX]: s['subnet'] for s in desired}
+        for sid, prefix in desired_map.items():
+            if served.get(sid) != prefix:
+                logging.error(
+                    'CB write divergence: subnet id=%s should be %s but Kea '
+                    'serves %s', sid, prefix, served.get(sid))
+        for sid in served.keys() - desired_map.keys():
+            logging.error(
+                'CB write divergence: Kea still serves subnet id=%s (%s) '
+                'that NetBox no longer defines', sid, served.get(sid))
 
     def _reconcile_reservations(self, desired):
         """Diff desired in-memory reservations against the hosts table and
@@ -402,4 +446,3 @@ class DHCP4CB(DHCP4App):
                 'modification_ts, cancelled) '
                 'VALUES (%s, %s, %s, false, %s, 1, %s, now(), false)',
                 (code, od.get('data'), 'dhcp4', sid, '[ ]'))
-
