@@ -6,6 +6,13 @@ class NetBoxKeaConfig(PluginConfig):
     verbose_name = "Kea"
     description = "Kea integration for NetBox"
     version = "2.0.0"
+    # NetBox gates the plugin on these at load time and raises
+    # IncompatiblePluginError on a mismatch. Pinned to 4.7 because the
+    # lease templates call Django's built-in querystring tag, which takes an
+    # optional QueryDict. NetBox 4.5 and 4.6 ship their own querystring tag
+    # that takes the request, so those releases cannot render these templates.
+    min_version = "4.7.0"
+    max_version = "4.7.99"
     base_url = "kea"
     default_settings = {
         "kea_timeout": 30,
