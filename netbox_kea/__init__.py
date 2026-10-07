@@ -5,13 +5,14 @@ class NetBoxKeaConfig(PluginConfig):
     name = "netbox_kea"
     verbose_name = "Kea"
     description = "Kea integration for NetBox"
-    version = "2.0.0"
+    version = "2.0.1+aghassi.1"
     # NetBox gates the plugin on these at load time and raises
-    # IncompatiblePluginError on a mismatch. Pinned to 4.7 because the
-    # lease templates call Django's built-in querystring tag, which takes an
-    # optional QueryDict. NetBox 4.5 and 4.6 ship their own querystring tag
-    # that takes the request, so those releases cannot render these templates.
-    min_version = "4.7.0"
+    # IncompatiblePluginError on a mismatch. The range mirrors the CI matrix,
+    # which is how this project states support. The floor is 4.5 because
+    # LeaseEventView uses netbox.api.authentication.TokenWritePermission,
+    # which NetBox added in 4.5. The ceiling is the newest release the matrix
+    # exercises. Raise both only with a matching CI leg.
+    min_version = "4.5.0"
     max_version = "4.7.99"
     base_url = "kea"
     default_settings = {
