@@ -1,6 +1,6 @@
 [project]
 name = "netbox-kea"
-version = "2.0.0"
+version = "2.0.1+aghassi.1"
 description = ""
 readme = "README.md"
 # NetBox 4.10 requires Python 3.10
@@ -9,7 +9,7 @@ authors = [
   {name = "Devon Mar", email = "devon-mar@users.noreply.github.com"},
 ]
 dependencies = [
-  "requests>=2.0.0,<3.0.0",
+  "requests>=2.34.0,<3.0.0",
   "netaddr>=0.8,<2.0.0",
   # keasync CB writer (direct config-backend SQL)
   "psycopg>=3.1",
@@ -17,11 +17,11 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-  "types-requests>=2.0.0,<3.0.0",
+  "types-requests>=2.33.0.20260513,<3.0.0",
   "mypy>=1.14.0,<1.20.0",
   "pytest>=8.0.0,<10.0.0",
   "pytest-playwright>=0.6.0,<0.8.0",
-  "pynetbox>=7.3.0,<7.7.0",
+  "pynetbox>=7.7.0,<7.8.0",
   "django-stubs[compatible-mypy]>=5.0.0,<6.0.0",
   # Doesn't work with ruff-action
   # "ruff>=0.8.0,<0.9.0",
